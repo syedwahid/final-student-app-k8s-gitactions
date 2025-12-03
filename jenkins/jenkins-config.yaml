@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-config
+  namespace: jenkins
+data:
+  jenkins.yaml: |
+    jenkins:
+      systemMessage: "Student Management System CI/CD Pipeline"
+      securityRealm:
+        local:
+          allowsSignup: false
+          users:
+          - id: "admin"
+            password: "admin123"
+      authorizationStrategy:
+        globalMatrix:
+          permissions:
+          - "Overall/Administer:admin"
+          - "Overall/Read:authenticated"
+    
+    credentials:
+      system:
+        domainCredentials:
+          - credentials:
+            - usernamePassword:
+                scope: SYSTEM
+                id: "docker-hub"
+                username: "${DOCKER_USERNAME}"
+                password: "${DOCKER_PASSWORD}"
+            - secretText:
+                scope: SYSTEM
+                id: "github-token"
+                secret: "${GITHUB_TOKEN}"
+    
+    jobs:
+      - script: >
+          pipelineJob('student-app-cicd') {
+            definition {
+              cpsScm {
+                scm {
+                  git {
+                    remote {
+                      url('${GIT_REPO_URL}')
+                      credentials('github-token')
+                    }
+                    branches('main')
+                    scriptPath('Jenkinsfile')
+                    extensions {
+                      cleanBeforeCheckout()
+                    }
+                  }
+                }
+              }
+            }
+            properties {
+              githubProjectProperty {
+                projectUrlStr('${GIT_REPO_URL}')
+              }
+            }
+            triggers {
+              scm('H/5 * * * *')
+              githubPush()
+            }
+          }
