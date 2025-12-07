@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
       - name: backend
-        image: student-backend:latest
+        image: student-backend-local:latest
         imagePullPolicy: Never
         ports:
         - containerPort: 3000
