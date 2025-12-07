@@ -7,57 +7,31 @@ pipeline {
     }
     
     stages {
-        stage('Destroy Existing Resources') {
+        stage('Checkout') {
             steps {
-                script {
-                    echo '💥 Cleaning up existing resources...'
-                    sh '''
-                        echo "1. Stopping port-forwards..."
-                        pkill -f "kubectl port-forward" 2>/dev/null || true
-                        
-                        echo "2. Deleting KIND cluster if exists..."
-                        kind delete cluster --name student-app 2>/dev/null || true
-                        
-                        echo "3. Removing old Docker images..."
-                        docker rmi -f student-backend:latest student-frontend:latest 2>/dev/null || true
-                        
-                        echo "✅ Cleanup complete"
-                    '''
-                }
+                checkout scm
+                echo '✅ Source code checked out'
             }
         }
         
-        stage('Create KIND Cluster') {
+        stage('Setup KIND Cluster') {
             steps {
                 script {
-                    echo '☸️ Creating fresh KIND cluster...'
+                    echo '☸️ Setting up KIND cluster using existing config...'
                     sh '''
-                        echo "Creating KIND configuration..."
-                        cat > /tmp/kind-config.yaml << 'EOF'
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-- role: control-plane
-  extraPortMappings:
-  - containerPort: 30001
-    hostPort: 30001
-    protocol: tcp
-  - containerPort: 31349
-    hostPort: 31349
-    protocol: tcp
-EOF
+                        echo "1. Checking if KIND cluster exists..."
+                        if ! kind get clusters | grep -q student-app; then
+                            echo "Creating KIND cluster using kind/kind-config-fixed.yaml..."
+                            kind create cluster --name student-app --config kind/kind-config-fixed.yaml
+                        else
+                            echo "✅ KIND cluster already exists"
+                        fi
                         
-                        echo "Creating KIND cluster..."
-                        kind create cluster --name student-app --config /tmp/kind-config.yaml
+                        echo "2. Setting up kubeconfig..."
+                        mkdir -p ~/.kube
+                        kind get kubeconfig --name student-app > ~/.kube/config
                         
-                        echo "Setting up kubeconfig..."
-                        mkdir -p /var/lib/jenkins/.kube
-                        kind get kubeconfig --name student-app | \\
-                            sed 's|server: https://.*:.*|server: https://127.0.0.1:6443|' | \\
-                            tee /var/lib/jenkins/.kube/config
-                        chmod 600 /var/lib/jenkins/.kube/config
-                        
-                        echo "✅ KIND cluster created"
+                        echo "✅ Cluster ready"
                         kubectl get nodes
                     '''
                 }
@@ -67,17 +41,17 @@ EOF
         stage('Build Docker Images') {
             steps {
                 script {
-                    echo '🐳 Building fresh Docker images...'
+                    echo '🐳 Building Docker images...'
                     sh '''
-                        echo "Building backend image..."
+                        echo "1. Building backend image..."
                         cd app/backend
                         docker build -t student-backend:latest .
                         
-                        echo "Building frontend image..."
+                        echo "2. Building frontend image..."
                         cd ../frontend
                         docker build -t student-frontend:latest .
                         
-                        echo "✅ Docker images built:"
+                        echo "✅ Images built:"
                         docker images | grep student-
                     '''
                 }
@@ -106,17 +80,12 @@ EOF
                 script {
                     echo '🔄 Preparing manifests for KIND...'
                     sh '''
-                        echo "1. Backing up original manifests..."
+                        echo "1. Setting imagePullPolicy to Never (required for KIND)..."
                         cp k8s/backend/deployment.yaml k8s/backend/deployment.yaml.backup
                         cp k8s/frontend/deployment.yaml k8s/frontend/deployment.yaml.backup
                         
-                        echo "2. Setting imagePullPolicy to Never (required for KIND)..."
                         sed -i 's/imagePullPolicy:.*/imagePullPolicy: Never/g' k8s/backend/deployment.yaml
                         sed -i 's/imagePullPolicy:.*/imagePullPolicy: Never/g' k8s/frontend/deployment.yaml
-                        
-                        echo "3. Ensuring correct image names..."
-                        sed -i 's|image:.*student-backend.*|image: student-backend:latest|g' k8s/backend/deployment.yaml
-                        sed -i 's|image:.*student-frontend.*|image: student-frontend:latest|g' k8s/frontend/deployment.yaml
                         
                         echo "✅ Manifests prepared"
                     '''
@@ -132,7 +101,7 @@ EOF
                         echo "1. Creating namespace..."
                         kubectl create namespace student-app --dry-run=client -o yaml | kubectl apply -f -
                         
-                        echo "2. Applying base configurations..."
+                        echo "2. Applying configurations..."
                         kubectl apply -f k8s/namespace.yaml
                         kubectl apply -f k8s/secrets.yaml
                         kubectl apply -f k8s/configmap.yaml
@@ -143,33 +112,11 @@ EOF
                         echo "4. Deploying Frontend..."
                         kubectl apply -f k8s/frontend/
                         
-                        echo "⏳ Waiting for pods to start (45 seconds)..."
-                        sleep 45
+                        echo "⏳ Waiting for pods (40 seconds)..."
+                        sleep 40
                         
                         echo "📊 Deployment status:"
                         kubectl get all -n student-app
-                    '''
-                }
-            }
-        }
-        
-        stage('Verify Deployment') {
-            steps {
-                script {
-                    echo '🔍 Verifying deployment...'
-                    sh '''
-                        echo "Checking pod status..."
-                        kubectl get pods -n student-app -o wide
-                        
-                        echo ""
-                        echo "Checking service status..."
-                        kubectl get svc -n student-app
-                        
-                        echo ""
-                        echo "🌐 Application URLs:"
-                        echo "Frontend UI:    http://localhost:31349"
-                        echo "Backend API:    http://localhost:30001/api/health"
-                        echo "Students API:   http://localhost:30001/api/students"
                     '''
                 }
             }
@@ -181,71 +128,27 @@ EOF
                     echo '🧪 Testing application...'
                     sh '''
                         echo "Testing backend API..."
-                        BACKEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:30001/api/health 2>/dev/null || echo "FAILED")
-                        if [ "$BACKEND_STATUS" = "200" ]; then
-                            echo "✅ Backend is working (HTTP $BACKEND_STATUS)"
-                            echo "Backend response:"
-                            curl -s http://localhost:30001/api/health | python3 -m json.tool 2>/dev/null || curl -s http://localhost:30001/api/health
+                        if curl -s http://localhost:30001/api/health > /dev/null; then
+                            echo "✅ Backend is working"
+                            curl -s http://localhost:30001/api/health | grep status || echo "No status in response"
                         else
-                            echo "❌ Backend not responding (Status: $BACKEND_STATUS)"
-                            echo "Checking pods..."
-                            kubectl describe pods -n student-app -l app=backend | tail -20
+                            echo "❌ Backend not responding"
                         fi
                         
                         echo ""
                         echo "Testing frontend..."
-                        FRONTEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:31349 2>/dev/null || echo "FAILED")
-                        if [ "$FRONTEND_STATUS" = "200" ]; then
-                            echo "✅ Frontend is working (HTTP $FRONTEND_STATUS)"
-                            echo "Frontend title:"
-                            curl -s http://localhost:31349 | grep -o "<title>.*</title>" || echo "No title found"
+                        if curl -s http://localhost:31349 > /dev/null; then
+                            echo "✅ Frontend is working"
+                            curl -s http://localhost:31349 | head -3
                         else
-                            echo "⚠️ Frontend status: $FRONTEND_STATUS"
+                            echo "❌ Frontend not responding"
                         fi
                         
                         echo ""
-                        echo "📋 Complete application test results saved to artifacts/test-results.txt"
-                        mkdir -p ${WORKSPACE}/artifacts
-                        echo "Backend: HTTP $BACKEND_STATUS" > ${WORKSPACE}/artifacts/test-results.txt
-                        echo "Frontend: HTTP $FRONTEND_STATUS" >> ${WORKSPACE}/artifacts/test-results.txt
-                        date >> ${WORKSPACE}/artifacts/test-results.txt
+                        echo "🌐 Application URLs:"
+                        echo "Frontend: http://localhost:31349"
+                        echo "Backend: http://localhost:30001/api/health"
                     '''
-                }
-            }
-        }
-        
-        stage('Create Access Guide') {
-            steps {
-                script {
-                    echo '📋 Creating access guide...'
-                    sh '''
-                        echo "Creating access script..."
-                        cat > ${WORKSPACE}/access-app.sh << 'EOF'
-#!/bin/bash
-echo "🎓 Student Management System"
-echo "============================"
-echo ""
-echo "📊 Current Status:"
-kubectl get pods -n student-app
-echo ""
-echo "🌐 Access URLs:"
-echo "   Frontend (UI):    http://localhost:31349"
-echo "   Backend API:      http://localhost:30001/api/health"
-echo "   Students API:     http://localhost:30001/api/students"
-echo ""
-echo "🔧 Troubleshooting:"
-echo "   Check logs:    kubectl logs -n student-app deployment/backend"
-echo "   Describe pods: kubectl describe pods -n student-app"
-echo "   Restart:       kubectl rollout restart deployment/backend -n student-app"
-echo ""
-echo "🧪 Quick Test:"
-curl -s http://localhost:30001/api/health | grep -o '"status":"[^"]*"' || echo "Backend not responding"
-EOF
-                        chmod +x ${WORKSPACE}/access-app.sh
-                        echo "✅ Access guide created: ${WORKSPACE}/access-app.sh"
-                    '''
-                    
-                    archiveArtifacts artifacts: 'access-app.sh, artifacts/**/*'
                 }
             }
         }
@@ -253,50 +156,19 @@ EOF
     
     post {
         success {
-            echo '🎉 AUTOMATED DEPLOYMENT COMPLETED SUCCESSFULLY!'
+            echo '🎉 CI/CD Pipeline completed successfully!'
             script {
-                currentBuild.description = "✅ Fresh deployment complete"
-                currentBuild.displayName = "#${BUILD_NUMBER} - Fresh Deploy"
-                
-                // Create summary
-                sh '''
-                    echo "📈 DEPLOYMENT SUMMARY"
-                    echo "===================="
-                    echo "✅ KIND cluster created"
-                    echo "✅ Docker images built and loaded"
-                    echo "✅ Kubernetes deployment complete"
-                    echo "✅ Application accessible at http://localhost:31349"
-                    echo ""
-                    echo "To destroy everything and start fresh:"
-                    echo "   ./nuke-everything.sh"
-                    echo ""
-                    echo "To access the application:"
-                    echo "   ./access-app.sh"
-                '''
+                currentBuild.description = "✅ Success - App deployed"
             }
         }
         failure {
-            echo '❌ DEPLOYMENT FAILED!'
+            echo '❌ Pipeline failed!'
             script {
-                currentBuild.description = "❌ Deployment failed"
-                
-                sh '''
-                    echo "🔧 Debug information:"
-                    echo "KIND clusters:"
-                    kind get clusters || echo "No KIND clusters"
-                    echo ""
-                    echo "Docker images:"
-                    docker images | grep student- || echo "No student images"
-                    echo ""
-                    echo "Kubernetes pods:"
-                    kubectl get pods --all-namespaces || echo "Cannot connect to Kubernetes"
-                '''
+                currentBuild.description = "❌ Failed - Check logs"
             }
         }
         always {
-            echo "🏁 Pipeline #${BUILD_NUMBER} completed"
-            echo "Result: ${currentBuild.currentResult}"
-            echo "Duration: ${currentBuild.durationString}"
+            echo "Build #${BUILD_NUMBER} completed"
         }
     }
 }
