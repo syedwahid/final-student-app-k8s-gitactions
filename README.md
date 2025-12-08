@@ -28,4 +28,4 @@ cd student-app-k8s
 ./scripts/deploy.sh
 
 # Access application
-./scripts/access-app.sh
+./scripts/access-app.sh# final-student-app-k8s-cicd
