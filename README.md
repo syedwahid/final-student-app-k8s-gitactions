@@ -29,3 +29,4 @@ cd student-app-k8s
 
 # Access application
 ./scripts/access-app.sh# final-student-app-k8s-cicd
+# final-student-app-k8s-cicd
