@@ -1,4 +1,4 @@
-# Student Management System - Kubernetes & Jenkins CI/CD
+# Student Management System - Kubernetes & CI/CD pipelines using Jenkins, GitActions and GCP Cloud Native CICD
 
 ## Overview
 A full-stack student management application with CI/CD pipeline using Jenkins and Kubernetes.
