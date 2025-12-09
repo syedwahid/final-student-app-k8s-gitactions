@@ -16,19 +16,19 @@ variable "gcp_zone" {
 }
 
 variable "vm_name" {
-  description = "VM instance name"
+  description = "Name of the VM instance"
   type        = string
   default     = "student-app-vm"
 }
 
 variable "vm_type" {
-  description = "VM machine type"
+  description = "Machine type for the VM"
   type        = string
   default     = "e2-medium"
 }
 
 variable "vm_image" {
-  description = "VM image"
+  description = "OS image for the VM"
   type        = string
   default     = "ubuntu-2204-lts"
 }
@@ -39,14 +39,7 @@ variable "disk_size" {
   default     = 20
 }
 
-variable "ssh_pub_key_path" {
-  description = "Path to SSH public key"
+variable "ssh_public_key" {
+  description = "SSH public key for VM access"
   type        = string
-  default     = "~/.ssh/id_rsa.pub"
-}
-
-variable "ssh_private_key_path" {
-  description = "Path to SSH private key"
-  type        = string
-  default     = "~/.ssh/id_rsa"
 }
