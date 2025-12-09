@@ -69,19 +69,194 @@ jobs:
         echo "🚀 Applying Terraform..."
         terraform apply -auto-approve
     
+    - name: Get VM IP Address
+      working-directory: ./terraform/gcp
+      id: get-ip
+      run: |
+        if terraform output vm_public_ip >/dev/null 2>&1; then
+          VM_IP=$(terraform output -raw vm_public_ip)
+          echo "VM_IP=$VM_IP" >> $GITHUB_ENV
+          echo "vm_ip=$VM_IP" >> $GITHUB_OUTPUT
+          echo "✅ VM IP: $VM_IP"
+        else
+          echo "❌ Failed to get VM IP"
+          exit 1
+        fi
+    
+    - name: Wait for VM SSH to be ready
+      run: |
+        echo "⏳ Waiting for SSH to be available on ${{ env.VM_IP }}..."
+        for i in {1..30}; do
+          if timeout 5 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${{ secrets.SSH_USER }}@${{ env.VM_IP }} "echo SSH test" 2>/dev/null; then
+            echo "✅ SSH is ready!"
+            break
+          fi
+          echo "Attempt $i/30: SSH not ready yet..."
+          sleep 10
+          if [ $i -eq 30 ]; then
+            echo "❌ SSH failed to become ready after 5 minutes"
+            exit 1
+          fi
+        done
+    
+    - name: Setup SSH Key for Deployment
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ env.VM_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+    
+    - name: Deploy Application to VM
+      run: |
+        echo "🚀 Deploying application to VM..."
+        
+        # 1. Copy application files to VM
+        echo "📁 Copying application files..."
+        scp -r ./ ${{ secrets.SSH_USER }}@${{ env.VM_IP }}:/tmp/student-app || echo "SCP completed"
+        
+        # 2. SSH into VM and deploy
+        ssh ${{ secrets.SSH_USER }}@${{ env.VM_IP }} << 'EOF'
+        set -e
+        echo "=== Starting Application Deployment ==="
+        
+        # Update system
+        echo "1. Updating system packages..."
+        sudo apt-get update -y
+        
+        # Install Docker if not installed
+        echo "2. Installing Docker..."
+        if ! command -v docker &> /dev/null; then
+          sudo apt-get install -y docker.io
+          sudo systemctl start docker
+          sudo systemctl enable docker
+          sudo usermod -aG docker $USER
+        fi
+        
+        # Install kubectl if not installed
+        echo "3. Installing kubectl..."
+        if ! command -v kubectl &> /dev/null; then
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          rm kubectl
+        fi
+        
+        # Install Kind if not installed
+        echo "4. Installing Kind..."
+        if ! command -v kind &> /dev/null; then
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+        fi
+        
+        # Create application directory
+        echo "5. Setting up application directory..."
+        APP_DIR="/opt/student-app"
+        sudo mkdir -p $APP_DIR
+        sudo chown -R $USER:$USER $APP_DIR
+        
+        # Copy files from temp to application directory
+        cp -r /tmp/student-app/* $APP_DIR/ 2>/dev/null || true
+        
+        # Navigate to app directory
+        cd $APP_DIR
+        
+        # 6. Build Docker image
+        echo "6. Building Docker image..."
+        docker build -t student-app:1.0.0 . --no-cache
+        
+        # 7. Create Kind cluster
+        echo "7. Creating Kind cluster..."
+        if kind get clusters | grep -q student-cluster; then
+          echo "Cluster exists, deleting..."
+          kind delete cluster --name student-cluster
+        fi
+        
+        # Create kind config if not exists
+        if [ ! -f kind-config.yaml ]; then
+          cat > kind-config.yaml << 'CONFIG_EOF'
+        kind: Cluster
+        apiVersion: kind.x-k8s.io/v1alpha4
+        nodes:
+        - role: control-plane
+          extraPortMappings:
+          - containerPort: 31349
+            hostPort: 31349
+            listenAddress: "0.0.0.0"
+            protocol: TCP
+          - containerPort: 30001
+            hostPort: 30001
+            listenAddress: "0.0.0.0"
+            protocol: TCP
+        CONFIG_EOF
+        fi
+        
+        kind create cluster --name student-cluster --config kind-config.yaml
+        
+        # 8. Load image into Kind
+        echo "8. Loading image into Kind..."
+        kind load docker-image student-app:1.0.0 --name student-cluster
+        
+        # 9. Update service.yaml with NodePort
+        echo "9. Configuring Kubernetes manifests..."
+        
+        # Update service.yaml to use NodePort
+        cat > k8s/service.yaml << 'SERVICE_EOF'
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: student-app-service
+          labels:
+            app: student-app
+        spec:
+          type: NodePort
+          selector:
+            app: student-app
+          ports:
+          - name: http
+            port: 80
+            targetPort: 9393
+            protocol: TCP
+            nodePort: 30001
+        SERVICE_EOF
+        
+        # 10. Deploy to Kubernetes
+        echo "10. Deploying to Kubernetes..."
+        kubectl apply -f k8s/deployment.yaml
+        kubectl apply -f k8s/service.yaml
+        
+        # 11. Wait for deployment
+        echo "11. Waiting for pods to be ready..."
+        sleep 20
+        kubectl get pods -o wide
+        kubectl get svc
+        
+        # 12. Create a frontend service if needed
+        echo "12. Creating frontend service (if applicable)..."
+        if [ -f "frontend-deployment.yaml" ]; then
+          kubectl apply -f frontend-deployment.yaml
+          kubectl apply -f frontend-service.yaml
+        fi
+        
+        echo "=== Application Deployment Complete ==="
+        echo "Backend URL: http://$HOSTNAME:30001/api/health"
+        echo "Frontend URL: http://$HOSTNAME:31349 (if applicable)"
+        EOF
+    
     - name: Display Results
       working-directory: ./terraform/gcp
       run: |
         echo "## 🎉 Deployment Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # Try to get IP
-        if terraform output vm_public_ip >/dev/null 2>&1; then
-          VM_IP=$(terraform output -raw vm_public_ip)
-          echo "**✅ VM IP:** $VM_IP" >> $GITHUB_STEP_SUMMARY
-          echo "**🌐 Frontend:** http://$VM_IP:31349" >> $GITHUB_STEP_SUMMARY
-          echo "**🔗 Backend:** http://$VM_IP:30001/api/health" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "**ℹ️ Status:** Infrastructure deployment completed" >> $GITHUB_STEP_SUMMARY
-          echo "Check GCP Console for VM details." >> $GITHUB_STEP_SUMMARY
-        fi
+        echo "**✅ VM IP:** ${{ env.VM_IP }}" >> $GITHUB_STEP_SUMMARY
+        echo "**🌐 Frontend:** http://${{ env.VM_IP }}:31349" >> $GITHUB_STEP_SUMMARY
+        echo "**🔗 Backend:** http://${{ env.VM_IP }}:30001/api/health" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**📋 Test Commands:**" >> $GITHUB_STEP_SUMMARY
+        echo "```bash" >> $GITHUB_STEP_SUMMARY
+        echo "# Test backend health" >> $GITHUB_STEP_SUMMARY
+        echo "curl http://${{ env.VM_IP }}:30001/api/health" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "# View Kubernetes pods" >> $GITHUB_STEP_SUMMARY
+        echo "ssh ${{ secrets.SSH_USER }}@${{ env.VM_IP }} 'kubectl get pods'" >> $GITHUB_STEP_SUMMARY
+        echo "```" >> $GITHUB_STEP_SUMMARY
