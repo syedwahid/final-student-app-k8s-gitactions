@@ -1,0 +1,13 @@
+{
+  "name": "student-management-single-container",
+  "version": "1.0.0",
+  "description": "Student Management System - Single Container Version",
+  "main": "student-app.js",
+  "scripts": {
+    "start": "node student-app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  }
+}
