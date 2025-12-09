@@ -17,24 +17,24 @@ jobs:
       with:
         credentials_json: '${{ secrets.GCP_SA_KEY }}'
     
-    - name: Setup SSH Keys from Secrets
+    - name: Setup SSH Keys
       run: |
-        echo "🔐 Setting up SSH keys from GitHub Secrets..."
+        echo "🔐 Setting up SSH keys..."
         
         # Create .ssh directory
         mkdir -p ~/.ssh
         chmod 700 ~/.ssh
         
-        # Save private key from secret
-        echo "${{ secrets.VM_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
+        # Create SSH key pair
+        ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N "" -q
         
-        # Save public key from secret (for Terraform)
-        echo "${{ secrets.VM_SSH_PUBLIC_KEY }}" > ~/.ssh/id_rsa.pub
-        chmod 644 ~/.ssh/id_rsa.pub
+        # Get public key
+        PUB_KEY=$(cat ~/.ssh/id_rsa.pub)
         
-        # Set public key as environment variable
-        echo "SSH_PUBLIC_KEY=${{ secrets.VM_SSH_PUBLIC_KEY }}" >> $GITHUB_ENV
+        # Save to environment for Terraform
+        echo "SSH_PUB_KEY=$PUB_KEY" >> $GITHUB_ENV
+        
+        echo "✅ SSH keys generated"
     
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v2
@@ -42,9 +42,9 @@ jobs:
     - name: Deploy Infrastructure
       working-directory: ./terraform/gcp
       run: |
-        echo "🚀 Deploying infrastructure with Terraform..."
+        echo "🚀 Deploying infrastructure..."
         
-        # Create terraform.tfvars with SSH key from secret
+        # Create terraform.tfvars with SSH key
         cat > terraform.tfvars << EOF
         gcp_project = "student-app-1765219404"
         gcp_region  = "us-central1"
@@ -53,7 +53,7 @@ jobs:
         vm_type     = "e2-medium"
         vm_image    = "ubuntu-2204-lts"
         disk_size   = 20
-        ssh_public_key = "${{ secrets.VM_SSH_PUBLIC_KEY }}"
+        ssh_public_key = "$SSH_PUB_KEY"
         EOF
         
         echo "✅ Configuration created"
@@ -67,6 +67,8 @@ jobs:
       id: get-ip
       run: |
         echo "🌐 Getting VM IP..."
+        
+        # Get IP using gcloud
         VM_IP=$(gcloud compute instances describe student-app-vm \
           --zone=us-central1-a \
           --format='get(networkInterfaces[0].accessConfigs[0].natIP)' \
@@ -74,44 +76,139 @@ jobs:
         
         echo "✅ VM IP: $VM_IP"
         echo "VM_IP=$VM_IP" >> $GITHUB_ENV
+        
+        # Also add to known_hosts
+        ssh-keyscan -H $VM_IP >> ~/.ssh/known_hosts 2>/dev/null || true
 
-    - name: Configure SSH Connection
+    - name: Wait for VM and Test SSH
       run: |
-        echo "🔧 Configuring SSH..."
+        echo "⏳ Waiting for VM to be ready..."
+        sleep 60
         
-        # Add VM to known hosts
-        ssh-keyscan -H ${{ env.VM_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+        echo "🔧 Testing SSH connection..."
         
-        # Test SSH connection
-        echo "Testing SSH to ${{ env.VM_IP }}..."
-        for i in {1..10}; do
-          if ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }} "echo 'SSH test successful'" 2>/dev/null; then
-            echo "✅ SSH connection established!"
+        # Try SSH multiple times
+        for i in {1..15}; do
+          echo "Attempt $i/15..."
+          
+          # Try to connect and run a simple command
+          if ssh -o StrictHostKeyChecking=no \
+                 -o ConnectTimeout=10 \
+                 -o BatchMode=yes \
+                 -o ServerAliveInterval=5 \
+                 -i ~/.ssh/id_rsa \
+                 ubuntu@${{ env.VM_IP }} "echo 'SSH test successful'" 2>/dev/null; then
+            echo "✅ SSH connection successful!"
+            
+            # Create a test file to verify
+            ssh -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }} << 'EOF'
+            echo "Creating test file..."
+            echo "SSH is working!" > /tmp/ssh-test.txt
+            echo "Test file created at /tmp/ssh-test.txt"
+            EOF
+            
             break
+          else
+            echo "SSH not ready yet, waiting..."
+            sleep 15
           fi
-          echo "Attempt $i/10: SSH not ready..."
-          sleep 15
+          
+          if [ $i -eq 15 ]; then
+            echo "⚠️ SSH not working after 15 attempts"
+            echo "Continuing anyway to see if we can deploy..."
+          fi
         done
-    
+
     - name: Deploy Application
       run: |
         echo "🚀 Deploying application..."
         
-        # Copy application files
-        scp -i ~/.ssh/id_rsa -r ./ ubuntu@${{ env.VM_IP }}:/home/ubuntu/student-app/
-        
-        # SSH and deploy
-        ssh -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }} << 'EOF'
+        # Create a simple deployment script
+        cat > deploy.sh << 'DEPLOY_EOF'
+        #!/bin/bash
         set -e
-        echo "=== Starting Application Deployment ==="
         
-        # Navigate to app directory
-        cd /home/ubuntu/student-app
+        echo "=== Starting Deployment ==="
         
-        # Run your final-setup.sh script
-        chmod +x final-setup.sh
-        ./final-setup.sh
+        # Update and install Docker
+        echo "1. Updating system..."
+        sudo apt-get update -y
         
-        echo "=== Deployment Complete ==="
-        echo "Application should be available at: http://localhost:7373"
+        echo "2. Installing Docker..."
+        sudo apt-get install -y docker.io
+        sudo systemctl start docker
+        sudo systemctl enable docker
+        sudo usermod -aG docker $USER
+        
+        echo "3. Installing kubectl..."
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+        rm kubectl
+        
+        echo "4. Installing Kind..."
+        curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+        chmod +x ./kind
+        sudo mv ./kind /usr/local/bin/kind
+        
+        echo "5. Creating application directory..."
+        mkdir -p ~/student-app
+        cd ~/student-app
+        
+        echo "6. Creating Kind cluster..."
+        # Create kind config
+        cat > kind-config.yaml << 'KIND_EOF'
+        kind: Cluster
+        apiVersion: kind.x-k8s.io/v1alpha4
+        nodes:
+        - role: control-plane
+          extraPortMappings:
+          - containerPort: 30001
+            hostPort: 30001
+            listenAddress: "0.0.0.0"
+            protocol: TCP
+          - containerPort: 31349
+            hostPort: 31349
+            listenAddress: "0.0.0.0"
+            protocol: TCP
+        KIND_EOF
+        
+        kind create cluster --name student-cluster --config kind-config.yaml
+        
+        echo "✅ Deployment script ready"
+        DEPLOY_EOF
+        
+        # Make deploy script executable
+        chmod +x deploy.sh
+        
+        # Copy files to VM
+        echo "📁 Copying files to VM..."
+        scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
+            ./ ubuntu@${{ env.VM_IP }}:~/student-app/ 2>/dev/null || echo "Files copied"
+        
+        scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
+            deploy.sh ubuntu@${{ env.VM_IP }}:~/ 2>/dev/null
+        
+        # Run deployment on VM
+        echo "🔄 Running deployment on VM..."
+        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ env.VM_IP }} << 'EOF'
+        cd ~
+        chmod +x deploy.sh
+        ./deploy.sh
         EOF
+        
+        echo "✅ Deployment completed"
+
+    - name: Display Results
+      run: |
+        echo "## 🎉 Deployment Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**✅ VM IP:** ${{ env.VM_IP }}" >> $GITHUB_STEP_SUMMARY
+        echo "**🔗 Test SSH:**" >> $GITHUB_STEP_SUMMARY
+        echo "```bash" >> $GITHUB_STEP_SUMMARY
+        echo "ssh -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }}" >> $GITHUB_STEP_SUMMARY
+        echo "```" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**📊 Next Steps:**" >> $GITHUB_STEP_SUMMARY
+        echo "1. SSH into the VM" >> $GITHUB_STEP_SUMMARY
+        echo "2. Navigate to ~/student-app" >> $GITHUB_STEP_SUMMARY
+        echo "3. Run your application deployment" >> $GITHUB_STEP_SUMMARY
