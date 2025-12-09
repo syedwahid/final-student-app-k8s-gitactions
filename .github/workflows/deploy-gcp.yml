@@ -35,7 +35,31 @@ jobs:
         echo "SSH_PUB_KEY=$PUB_KEY" >> $GITHUB_ENV
         
         echo "✅ SSH keys generated"
-    
+
+    - name: Clean up existing resources
+      run: |
+        echo "🧹 Cleaning up existing resources..."
+        
+        # Delete firewall if exists
+        gcloud compute firewall-rules delete allow-student-app \
+          --quiet \
+          --project=student-app-1765219404 2>/dev/null || echo "Firewall not found or already deleted"
+        
+        # Delete static IP if exists
+        gcloud compute addresses delete student-app-vm-ip \
+          --region=us-central1 \
+          --quiet \
+          --project=student-app-1765219404 2>/dev/null || echo "Static IP not found or already deleted"
+        
+        # Delete VM if exists
+        gcloud compute instances delete student-app-vm \
+          --zone=us-central1-a \
+          --quiet \
+          --project=student-app-1765219404 2>/dev/null || echo "VM not found or already deleted"
+        
+        echo "✅ Cleanup complete"
+        sleep 10
+
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v2
     
