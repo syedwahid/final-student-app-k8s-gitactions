@@ -1,4 +1,4 @@
-name: Deploy to GCP VM
+name: Deploy to GCP VM - FIXED
 
 on:
   push:
@@ -6,36 +6,49 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  terraform-apply:
+    name: Terraform Apply
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
+    - name: Checkout Repository
       uses: actions/checkout@v3
-    
-    - name: Setup GCP Auth
-      uses: google-github-actions/auth@v1
-      with:
-        credentials_json: '${{ secrets.GCP_SA_KEY }}'
     
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v2
     
-    - name: Terraform Apply
+    - name: Setup GCP Credentials
+      uses: google-github-actions/auth@v1
+      with:
+        credentials_json: '${{ secrets.GCP_SA_KEY }}'
+    
+    - name: Setup GCloud CLI
+      uses: google-github-actions/setup-gcloud@v1
+    
+    - name: Create terraform.tfvars
       working-directory: ./terraform/gcp
       run: |
-        terraform init
-        terraform apply -auto-approve
+        cat > terraform.tfvars << EOF
+        gcp_project = "${{ secrets.GCP_PROJECT_ID }}"
+        gcp_region  = "us-central1"
+        gcp_zone    = "us-central1-a"
+        vm_name     = "student-app-vm"
+        EOF
+    
+    - name: Terraform Init
+      working-directory: ./terraform/gcp
+      run: terraform init
+    
+    - name: Terraform Apply
+      working-directory: ./terraform/gcp
+      run: terraform apply -auto-approve
     
     - name: Get VM IP
       id: get-ip
       working-directory: ./terraform/gcp
       run: |
         VM_IP=$(terraform output -raw vm_public_ip)
-        echo "vm_ip=$VM_IP" >> $GITHUB_OUTPUT
+        echo "vm_public_ip=$VM_IP" >> $GITHUB_OUTPUT
     
-    - name: Display URLs
-      run: |
-        echo "🎉 Deployment Complete!"
-        echo "Frontend: http://${{ steps.get-ip.outputs.vm_ip }}:31349"
-        echo "Backend: http://${{ steps.get-ip.outputs.vm_ip }}:30001/api/health"
+    outputs:
+      vm_ip: ${{ steps.get-ip.outputs.vm_public_ip }}
