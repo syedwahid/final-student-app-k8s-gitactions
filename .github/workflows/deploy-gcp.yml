@@ -9,10 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
+    - name: Checkout
       uses: actions/checkout@v3
     
-    - name: Setup GCP Authentication
+    - name: Auth to GCP
       uses: google-github-actions/auth@v1
       with:
         credentials_json: '${{ secrets.GCP_SA_KEY }}'
@@ -20,47 +20,23 @@ jobs:
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v2
     
-    - name: Deploy Infrastructure
+    - name: Deploy VM
       working-directory: ./terraform/gcp
       run: |
-        # Initialize Terraform
         terraform init
         
-        # Create configuration file
+        # Create terraform.tfvars file
         cat > terraform.tfvars << 'EOF'
         gcp_project = "student-app-1765219404"
         gcp_region  = "us-central1"
         gcp_zone    = "us-central1-a"
         vm_name     = "student-app-vm"
-        vm_type     = "e2-medium"
-        vm_image    = "ubuntu-2204-lts"
-        disk_size   = 20
         EOF
         
-        echo "Configuration file created:"
-        cat terraform.tfvars
-        
-        # Deploy
-        echo "Applying Terraform configuration..."
+        # Apply
         terraform apply -auto-approve
     
-    - name: Display Results
+    - name: Show VM IP
       working-directory: ./terraform/gcp
       run: |
-        echo "## 🎉 Deployment Results" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        # Check if Terraform has outputs
-        if terraform output vm_public_ip >/dev/null 2>&1; then
-          VM_IP=$(terraform output -raw vm_public_ip)
-          echo "**✅ VM IP:** $VM_IP" >> $GITHUB_STEP_SUMMARY
-          echo "**🌐 Frontend:** http://$VM_IP:31349" >> $GITHUB_STEP_SUMMARY
-          echo "**🔗 Backend:** http://$VM_IP:30001/api/health" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "**⚠️  Note:** Resources may already exist or deployment had issues." >> $GITHUB_STEP_SUMMARY
-          echo "Check GCP Console for existing VM." >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Project:** student-app-1765219404" >> $GITHUB_STEP_SUMMARY
-        echo "**Status:** Infrastructure deployment completed" >> $GITHUB_STEP_SUMMARY
+        echo "VM IP: $(terraform output -raw vm_public_ip)"
