@@ -73,14 +73,40 @@ jobs:
       working-directory: ./terraform/gcp
       id: get-ip
       run: |
-        if terraform output vm_public_ip >/dev/null 2>&1; then
-          VM_IP=$(terraform output -raw vm_public_ip)
+        echo "Getting VM IP from Terraform state..."
+        
+        # Method 1: Try to get IP directly from terraform show (more reliable)
+        VM_IP=$(terraform show -json | jq -r '.values.outputs.vm_public_ip.value // empty')
+        
+        # If Method 1 fails, try Method 2: from output
+        if [ -z "$VM_IP" ]; then
+          echo "Trying alternative method..."
+          VM_IP=$(terraform output -raw vm_public_ip 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        fi
+        
+        # Validate IP
+        if [ -n "$VM_IP" ] && [[ $VM_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "✅ VM IP: $VM_IP"
           echo "VM_IP=$VM_IP" >> $GITHUB_ENV
           echo "vm_ip=$VM_IP" >> $GITHUB_OUTPUT
-          echo "✅ VM IP: $VM_IP"
         else
-          echo "❌ Failed to get VM IP"
-          exit 1
+          echo "❌ Failed to get valid VM IP"
+          echo "Attempting to get IP from gcloud directly..."
+          
+          # Try to get IP from gcloud as fallback
+          VM_IP=$(gcloud compute instances describe student-app-vm \
+            --zone=us-central1-a \
+            --format='get(networkInterfaces[0].accessConfigs[0].natIP)' \
+            --project=student-app-1765219404 2>/dev/null || echo "")
+            
+          if [ -n "$VM_IP" ]; then
+            echo "✅ Got VM IP from gcloud: $VM_IP"
+            echo "VM_IP=$VM_IP" >> $GITHUB_ENV
+            echo "vm_ip=$VM_IP" >> $GITHUB_OUTPUT
+          else
+            echo "❌ All methods failed to get VM IP"
+            exit 1
+          fi
         fi
     
     - name: Wait for VM SSH to be ready
@@ -122,6 +148,7 @@ jobs:
         # Update system
         echo "1. Updating system packages..."
         sudo apt-get update -y
+        sudo apt-get install -y jq
         
         # Install Docker if not installed
         echo "2. Installing Docker..."
