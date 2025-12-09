@@ -1,13 +1,10 @@
-# main.tf - GCP VM Deployment for Student App
-
-# Configure the Google Cloud provider
+# main.tf - Complete Terraform configuration
 provider "google" {
   project = var.gcp_project
   region  = var.gcp_region
   zone    = var.gcp_zone
 }
 
-# Define input variables
 variable "gcp_project" {
   description = "GCP Project ID"
   type        = string
@@ -54,14 +51,12 @@ variable "ssh_public_key" {
   type        = string
 }
 
-# Create a static external IP address
 resource "google_compute_address" "static_ip" {
   name    = "${var.vm_name}-ip"
   region  = var.gcp_region
   project = var.gcp_project
 }
 
-# Create a firewall rule to allow HTTP, HTTPS, and custom ports
 resource "google_compute_firewall" "allow_app_ports" {
   name    = "allow-student-app-ports"
   network = "default"
@@ -76,7 +71,6 @@ resource "google_compute_firewall" "allow_app_ports" {
   target_tags   = ["student-app"]
 }
 
-# Create the VM instance
 resource "google_compute_instance" "student_app_vm" {
   name         = var.vm_name
   machine_type = var.vm_type
@@ -101,12 +95,10 @@ resource "google_compute_instance" "student_app_vm" {
     }
   }
 
-  # SSH key configuration
   metadata = {
     ssh-keys = "ubuntu:${var.ssh_public_key}"
   }
 
-  # Startup script to install Docker and basic tools
   metadata_startup_script = <<-EOF
     #!/bin/bash
     
@@ -114,11 +106,9 @@ resource "google_compute_instance" "student_app_vm" {
     echo "VM Hostname: $(hostname)"
     echo "Public IP: $(curl -s ifconfig.me)"
     
-    # Update system
     sudo apt-get update -y
     sudo apt-get upgrade -y
     
-    # Install essential tools
     sudo apt-get install -y \
       curl \
       wget \
@@ -129,47 +119,39 @@ resource "google_compute_instance" "student_app_vm" {
       tree \
       jq
     
-    # Install Docker
     echo "Installing Docker..."
     sudo apt-get install -y docker.io
     sudo systemctl start docker
     sudo systemctl enable docker
     sudo usermod -aG docker ubuntu
     
-    # Install Docker Compose
     sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
       -o /usr/local/bin/docker-compose
     sudo chmod +x /usr/local/bin/docker-compose
     
-    # Install kubectl
     echo "Installing kubectl..."
     curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
     sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
     rm kubectl
     
-    # Install Kind (Kubernetes in Docker)
     echo "Installing Kind..."
     curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
     chmod +x ./kind
     sudo mv ./kind /usr/local/bin/kind
     
-    # Create application directory
     sudo mkdir -p /opt/student-app
     sudo chown -R ubuntu:ubuntu /opt/student-app
     
-    # Set up swap (optional, for small VMs)
     sudo fallocate -l 2G /swapfile
     sudo chmod 600 /swapfile
     sudo mkswap /swapfile
     sudo swapon /swapfile
     echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
     
-    # Increase file descriptors limit for Docker
     echo "fs.file-max = 1000000" | sudo tee -a /etc/sysctl.conf
     echo "ubuntu soft nofile 1000000" | sudo tee -a /etc/security/limits.conf
     echo "ubuntu hard nofile 1000000" | sudo tee -a /etc/security/limits.conf
     
-    # Configure Docker to use systemd cgroup driver
     sudo mkdir -p /etc/docker
     cat << DOCKER_EOF | sudo tee /etc/docker/daemon.json
     {
@@ -182,11 +164,9 @@ resource "google_compute_instance" "student_app_vm" {
     }
     DOCKER_EOF
     
-    # Restart Docker
     sudo systemctl daemon-reload
     sudo systemctl restart docker
     
-    # Create Kind configuration
     cat << KIND_EOF > /opt/student-app/kind-config.yaml
     kind: Cluster
     apiVersion: kind.x-k8s.io/v1alpha4
@@ -211,11 +191,9 @@ resource "google_compute_instance" "student_app_vm" {
         protocol: TCP
     KIND_EOF
     
-    # Clean up
     sudo apt-get autoremove -y
     sudo apt-get clean
     
-    # Set permissions for application directory
     sudo chown -R ubuntu:ubuntu /opt/student-app
     
     echo "=== Startup Script Complete ==="
@@ -225,46 +203,38 @@ resource "google_compute_instance" "student_app_vm" {
     echo "Kind version: $(kind version)"
   EOF
 
-  # Ensure VM has enough resources
   scheduling {
     automatic_restart   = true
     on_host_maintenance = "MIGRATE"
   }
 
-  # Service account with necessary permissions
   service_account {
     scopes = ["cloud-platform"]
   }
 
-  # Allow the instance to be stopped for maintenance
   allow_stopping_for_update = true
 }
 
-# Output the VM's public IP address
 output "vm_public_ip" {
   description = "Public IP address of the VM"
   value       = google_compute_address.static_ip.address
 }
 
-# Output the VM's internal IP address
 output "vm_internal_ip" {
   description = "Internal IP address of the VM"
   value       = google_compute_instance.student_app_vm.network_interface[0].network_ip
 }
 
-# Output the instance ID
 output "instance_id" {
   description = "Instance ID"
   value       = google_compute_instance.student_app_vm.instance_id
 }
 
-# Output SSH connection command
 output "ssh_command" {
   description = "SSH command to connect to the VM"
   value       = "ssh -i ~/.ssh/id_rsa ubuntu@${google_compute_address.static_ip.address}"
 }
 
-# Output application URLs
 output "app_urls" {
   description = "Application URLs"
   value = {
