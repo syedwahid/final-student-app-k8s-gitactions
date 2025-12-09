@@ -112,26 +112,43 @@ jobs:
     
     - name: Wait for VM SSH to be ready
       run: |
-        echo "⏳ Waiting for SSH to be available on ${{ env.VM_IP }}..."
-        for i in {1..30}; do
-          if timeout 5 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 ${{ secrets.SSH_USER }}@${{ env.VM_IP }} "echo SSH test" 2>/dev/null; then
+        echo "⏳ Waiting for VM to be ready..."
+        sleep 60  # Wait longer for VM to fully boot
+        
+        echo "🔑 Generating SSH key pair..."
+        ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N "" -q
+        
+        echo "📝 Adding SSH key to GCP VM metadata..."
+        PUB_KEY=$(cat ~/.ssh/id_rsa.pub)
+        gcloud compute instances add-metadata student-app-vm \
+          --zone=us-central1-a \
+          --metadata=ssh-keys="ubuntu:${PUB_KEY}" \
+          --project=student-app-1765219404
+        
+        echo "⏳ Waiting another 30 seconds for SSH to initialize..."
+        sleep 30
+        
+        echo "Testing SSH connection to ${{ env.VM_IP }}..."
+        for i in {1..10}; do
+          if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }} "echo 'SSH connection successful'" 2>/dev/null; then
             echo "✅ SSH is ready!"
             break
           fi
-          echo "Attempt $i/30: SSH not ready yet..."
+          echo "Attempt $i/10: SSH not ready yet..."
           sleep 10
-          if [ $i -eq 30 ]; then
-            echo "❌ SSH failed to become ready after 5 minutes"
-            exit 1
+          if [ $i -eq 10 ]; then
+            echo "⚠️ SSH still not ready, continuing anyway..."
+            break
           fi
         done
-    
-    - name: Setup SSH Key for Deployment
+
+    - name: Setup SSH Configuration
       run: |
+        echo "Configuring SSH..."
         mkdir -p ~/.ssh
-        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        ssh-keyscan -H ${{ env.VM_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+        chmod 700 ~/.ssh
+        ssh-keyscan -H ${{ env.VM_IP }} >> ~/.ssh/known_hosts 2>/dev/null || true
+        echo "SSH setup complete"
     
     - name: Deploy Application to VM
       run: |

@@ -33,9 +33,9 @@ resource "google_compute_instance" "student_app_vm" {
     }
   }
 
-  # Metadata for SSH
+ # Ensure SSH is enabled
   metadata = {
-    # ssh-keys removed for GitHub Actions
+    ssh-keys = "ubuntu:${file("~/.ssh/id_rsa.pub")}"  # or your username
   }
 
   # Startup script to install required tools
