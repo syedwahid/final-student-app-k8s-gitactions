@@ -73,15 +73,25 @@ jobs:
       working-directory: ./terraform/gcp
       id: get-ip
       run: |
-        echo "Getting VM IP from Terraform state..."
+        echo "Getting VM IP..."
         
-        # Method 1: Try to get IP directly from terraform show (more reliable)
-        VM_IP=$(terraform show -json | jq -r '.values.outputs.vm_public_ip.value // empty')
+        # Run terraform output and extract only the IP part
+        RAW_OUTPUT=$(terraform output vm_public_ip 2>&1)
+        echo "Raw output: $RAW_OUTPUT"
         
-        # If Method 1 fails, try Method 2: from output
-        if [ -z "$VM_IP" ]; then
-          echo "Trying alternative method..."
-          VM_IP=$(terraform output -raw vm_public_ip 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        # Extract just the IP (everything before "::")
+        VM_IP=$(echo "$RAW_OUTPUT" | cut -d':' -f1)
+        
+        echo "Extracted IP: $VM_IP"
+        
+        # Basic validation
+        if [[ $VM_IP == *.*.*.* ]]; then
+          echo "✅ VM IP: $VM_IP"
+          echo "VM_IP=$VM_IP" >> $GITHUB_ENV
+          echo "vm_ip=$VM_IP" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Invalid IP format: $VM_IP"
+          exit 1
         fi
         
         # Validate IP
