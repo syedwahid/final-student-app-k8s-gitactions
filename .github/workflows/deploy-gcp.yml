@@ -107,41 +107,17 @@ jobs:
     - name: Wait for VM and Test SSH
       run: |
         echo "⏳ Waiting for VM to be ready..."
-        sleep 60
+        sleep 120  # Wait 2 minutes for VM
         
-        echo "🔧 Testing SSH connection..."
+        echo "🔧 Testing SSH (will continue even if it fails)..."
         
-        # Try SSH multiple times
-        for i in {1..15}; do
-          echo "Attempt $i/15..."
-          
-          # Try to connect and run a simple command
-          if ssh -o StrictHostKeyChecking=no \
-                 -o ConnectTimeout=10 \
-                 -o BatchMode=yes \
-                 -o ServerAliveInterval=5 \
-                 -i ~/.ssh/id_rsa \
-                 ubuntu@${{ env.VM_IP }} "echo 'SSH test successful'" 2>/dev/null; then
-            echo "✅ SSH connection successful!"
-            
-            # Create a test file to verify
-            ssh -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }} << 'EOF'
-            echo "Creating test file..."
-            echo "SSH is working!" > /tmp/ssh-test.txt
-            echo "Test file created at /tmp/ssh-test.txt"
-            EOF
-            
-            break
-          else
-            echo "SSH not ready yet, waiting..."
-            sleep 15
-          fi
-          
-          if [ $i -eq 15 ]; then
-            echo "⚠️ SSH not working after 15 attempts"
-            echo "Continuing anyway to see if we can deploy..."
-          fi
-        done
+        # Just try once and continue regardless
+        ssh -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=5 \
+            -i ~/.ssh/id_rsa \
+            ubuntu@${{ env.VM_IP }} "echo 'VM is up'" || echo "SSH not ready yet, continuing anyway..."
+        
+        echo "Proceeding with deployment..."
 
     - name: Deploy Application
       run: |
