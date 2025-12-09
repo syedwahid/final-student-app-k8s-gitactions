@@ -1,4 +1,4 @@
-name: Deploy to GCP VM - FIXED
+name: Deploy to GCP VM
 
 on:
   push:
@@ -25,30 +25,34 @@ jobs:
     - name: Setup GCloud CLI
       uses: google-github-actions/setup-gcloud@v1
     
-    - name: Create terraform.tfvars
+    - name: Enable Required APIs
+      run: |
+        gcloud services enable compute.googleapis.com \
+          cloudresourcemanager.googleapis.com \
+          --project="${{ secrets.GCP_PROJECT_ID }}" --quiet
+        sleep 30
+    
+    - name: Terraform Apply with Variables
       working-directory: ./terraform/gcp
       run: |
-        cat > terraform.tfvars << EOF
-        gcp_project = "${{ secrets.GCP_PROJECT_ID }}"
-        gcp_region  = "us-central1"
-        gcp_zone    = "us-central1-a"
-        vm_name     = "student-app-vm"
-        EOF
-    
-    - name: Terraform Init
-      working-directory: ./terraform/gcp
-      run: terraform init
-    
-    - name: Terraform Apply
-      working-directory: ./terraform/gcp
-      run: terraform apply -auto-approve
+        terraform init
+        
+        # Apply with ALL variables explicitly
+        terraform apply -auto-approve \
+          -var="gcp_project=${{ secrets.GCP_PROJECT_ID }}" \
+          -var="gcp_region=us-central1" \
+          -var="gcp_zone=us-central1-a" \
+          -var="vm_name=student-app-vm" \
+          -var="vm_type=e2-medium" \
+          -var="disk_size=20"
     
     - name: Get VM IP
       id: get-ip
       working-directory: ./terraform/gcp
       run: |
         VM_IP=$(terraform output -raw vm_public_ip)
-        echo "vm_public_ip=$VM_IP" >> $GITHUB_OUTPUT
+        echo "vm_ip=$VM_IP" >> $GITHUB_OUTPUT
+        echo "✅ VM Public IP: $VM_IP"
     
     outputs:
-      vm_ip: ${{ steps.get-ip.outputs.vm_public_ip }}
+      vm_ip: ${{ steps.get-ip.outputs.vm_ip }}
