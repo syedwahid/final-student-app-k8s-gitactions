@@ -20,25 +20,46 @@ jobs:
     - name: Setup SSH Keys
       run: |
         echo "🔐 Setting up SSH keys..."
+        
+        # Create .ssh directory
         mkdir -p ~/.ssh
         chmod 700 ~/.ssh
+        
+        # Create SSH key pair
         ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa -N "" -q
+        
+        # Get public key
         PUB_KEY=$(cat ~/.ssh/id_rsa.pub)
+        
+        # Save to environment for Terraform
         echo "SSH_PUB_KEY=$PUB_KEY" >> $GITHUB_ENV
+        
         echo "✅ SSH keys generated"
-    
+
     - name: Clean up existing resources
       run: |
         echo "🧹 Cleaning up existing resources..."
-        gcloud compute firewall-rules delete allow-student-app-ports \
-          --quiet --project=student-app-1765219404 2>/dev/null || echo "Firewall not found"
+        
+        # Delete firewall if exists
+        gcloud compute firewall-rules delete allow-student-app \
+          --quiet \
+          --project=student-app-1765219404 2>/dev/null || echo "Firewall not found or already deleted"
+        
+        # Delete static IP if exists
         gcloud compute addresses delete student-app-vm-ip \
-          --region=us-central1 --quiet --project=student-app-1765219404 2>/dev/null || echo "Static IP not found"
+          --region=us-central1 \
+          --quiet \
+          --project=student-app-1765219404 2>/dev/null || echo "Static IP not found or already deleted"
+        
+        # Delete VM if exists
         gcloud compute instances delete student-app-vm \
-          --zone=us-central1-a --quiet --project=student-app-1765219404 2>/dev/null || echo "VM not found"
+          --zone=us-central1-a \
+          --quiet \
+          --project=student-app-1765219404 2>/dev/null || echo "VM not found or already deleted"
+        
         echo "✅ Cleanup complete"
         sleep 10
-    
+
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v2
     
@@ -46,6 +67,8 @@ jobs:
       working-directory: ./terraform/gcp
       run: |
         echo "🚀 Deploying infrastructure..."
+        
+        # Create terraform.tfvars with SSH key
         cat > terraform.tfvars << EOF
         gcp_project = "student-app-1765219404"
         gcp_region  = "us-central1"
@@ -56,6 +79,10 @@ jobs:
         disk_size   = 20
         ssh_public_key = "$SSH_PUB_KEY"
         EOF
+        
+        echo "✅ Configuration created"
+        
+        # Initialize and apply
         terraform init
         terraform apply -auto-approve
     
@@ -64,61 +91,72 @@ jobs:
       id: get-ip
       run: |
         echo "🌐 Getting VM IP..."
+        
+        # Get IP using gcloud
         VM_IP=$(gcloud compute instances describe student-app-vm \
           --zone=us-central1-a \
           --format='get(networkInterfaces[0].accessConfigs[0].natIP)' \
           --project=student-app-1765219404)
+        
         echo "✅ VM IP: $VM_IP"
         echo "VM_IP=$VM_IP" >> $GITHUB_ENV
+        
+        # Also add to known_hosts
         ssh-keyscan -H $VM_IP >> ~/.ssh/known_hosts 2>/dev/null || true
-    
-    - name: Fix Firewall for Port 30080
-      run: |
-        echo "🔓 Fixing firewall - adding port 30080..."
-        gcloud compute firewall-rules update allow-student-app-ports \
-          --project=student-app-1765219404 \
-          --allow tcp:22,tcp:80,tcp:443,tcp:3000,tcp:3001,tcp:7373,tcp:9393,tcp:30001,tcp:31349,tcp:30080
-        echo "✅ Port 30080 added to firewall"
-        sleep 15
-    
+
     - name: Wait for VM and Test SSH
       run: |
         echo "⏳ Waiting for VM to be ready..."
-        sleep 120
-        echo "🔧 Testing SSH..."
-        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }} "echo 'VM is up'" || echo "SSH not ready, continuing anyway..."
+        sleep 120  # Wait 2 minutes for VM
+        
+        echo "🔧 Testing SSH (will continue even if it fails)..."
+        
+        # Just try once and continue regardless
+        ssh -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=5 \
+            -i ~/.ssh/id_rsa \
+            ubuntu@${{ env.VM_IP }} "echo 'VM is up'" || echo "SSH not ready yet, continuing anyway..."
+        
         echo "Proceeding with deployment..."
-    
+
     - name: Deploy Application
       run: |
         echo "🚀 Deploying application..."
-        scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ./ ubuntu@${{ env.VM_IP }}:~/student-app/ 2>/dev/null || echo "Files copied"
-        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ env.VM_IP }} << 'ENDSSH'
-        cd ~/student-app
+        
+        # Create a simple deployment script
+        cat > deploy.sh << 'DEPLOY_EOF'
+        #!/bin/bash
+        set -e
+        
         echo "=== Starting Deployment ==="
+        
+        # Update and install Docker
+        echo "1. Updating system..."
         sudo apt-get update -y
+        
+        echo "2. Installing Docker..."
         sudo apt-get install -y docker.io
         sudo systemctl start docker
         sudo systemctl enable docker
         sudo usermod -aG docker $USER
+        
+        echo "3. Installing kubectl..."
         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
         rm kubectl
+        
+        echo "4. Installing Kind..."
         curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
         chmod +x ./kind
         sudo mv ./kind /usr/local/bin/kind
+        
+        echo "5. Creating application directory..."
         mkdir -p ~/student-app
         cd ~/student-app
-        echo "✅ Basic setup complete"
-        ENDSSH
-    
-    - name: Setup Kind Cluster
-      run: |
-        echo "🔧 Setting up Kind cluster..."
-        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ env.VM_IP }} << 'ENDSSH'
-        cd ~/student-app
-        echo "Creating Kind cluster..."
-        cat > kind-config.yaml << 'CONFIG_EOF'
+        
+        echo "6. Creating Kind cluster..."
+        # Create kind config
+        cat > kind-config.yaml << 'KIND_EOF'
         kind: Cluster
         apiVersion: kind.x-k8s.io/v1alpha4
         nodes:
@@ -128,140 +166,49 @@ jobs:
             hostPort: 30001
             listenAddress: "0.0.0.0"
             protocol: TCP
-          - containerPort: 30080
-            hostPort: 30080
-            listenAddress: "0.0.0.0"
-            protocol: TCP
           - containerPort: 31349
             hostPort: 31349
             listenAddress: "0.0.0.0"
             protocol: TCP
-        CONFIG_EOF
+        KIND_EOF
+        
         kind create cluster --name student-cluster --config kind-config.yaml
-        echo "✅ Kind cluster created"
-        ENDSSH
-    
-    - name: Build and Deploy Student App
-      run: |
-        echo "🔨 Building and deploying Student App..."
-        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ env.VM_IP }} << 'ENDSSH'
-        cd ~/student-app
-        echo "1. Building Docker image..."
-        docker build -t student-app:1.0.0 . --no-cache
-        echo "2. Loading into Kind..."
-        kind load docker-image student-app:1.0.0 --name student-cluster
-        echo "3. Creating proper service..."
-        cat > k8s/service-correct.yaml << 'SERVICE_EOF'
-        apiVersion: v1
-        kind: Service
-        metadata:
-          name: student-app-service
-          labels:
-            app: student-app
-        spec:
-          type: NodePort
-          selector:
-            app: student-app
-          ports:
-          - name: http
-            port: 9393
-            targetPort: 9393
-            nodePort: 30001
-        SERVICE_EOF
-        echo "4. Deploying to Kubernetes..."
-        kubectl apply -f k8s/deployment.yaml
-        kubectl apply -f k8s/service-correct.yaml
-        sleep 30
-        echo "5. Checking deployment..."
-        kubectl get pods
-        kubectl get svc
-        ENDSSH
-    
-    - name: Check Application Status
-      run: |
-        echo "🔍 Checking application status..."
-        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ env.VM_IP }} << 'ENDSSH'
-        echo "=== Pod Status ==="
-        kubectl get pods -o wide
-        echo ""
-        echo "=== Pod Logs ==="
-        kubectl logs -l app=student-app --tail=20 2>/dev/null || echo "No logs yet"
-        echo ""
-        echo "=== Testing locally ==="
-        timeout 10 curl -s http://localhost:30001/api/health && echo "✅ Local test passed" || echo "❌ Local test failed"
-        ENDSSH
-    
-    - name: Test Application from Outside
-      run: |
-        echo "🧪 Testing application from outside..."
-        echo "Testing http://${{ env.VM_IP }}:30001/api/health"
-        echo ""
-        echo "If this hangs, checking connectivity..."
         
-        # First check if port is open
-        if timeout 5 bash -c "echo > /dev/tcp/${{ env.VM_IP }}/30001"; then
-          echo "✅ Port 30001 is OPEN"
-          echo "Trying HTTP request..."
-          RESPONSE=$(timeout 15 curl -s -o /dev/null -w "%{http_code}" http://${{ env.VM_IP }}:30001/api/health 2>/dev/null || echo "TIMEOUT")
-          if [ "$RESPONSE" = "200" ]; then
-            echo "✅ Application is responding with HTTP 200!"
-            curl -s http://${{ env.VM_IP }}:30001/api/health | head -c 100
-            echo "..."
-          elif [ "$RESPONSE" = "TIMEOUT" ]; then
-            echo "⚠️ Connection hangs - application not responding"
-          else
-            echo "⚠️ Got HTTP $RESPONSE"
-          fi
-        else
-          echo "❌ Port 30001 is CLOSED"
-        fi
+        echo "✅ Deployment script ready"
+        DEPLOY_EOF
         
-        # Also try port 30080
-        echo ""
-        echo "Testing port 30080..."
-        timeout 5 curl -s http://${{ env.VM_IP }}:30080/api/health && echo "✅ Port 30080 works!" || echo "❌ Port 30080 failed"
-    
-    - name: Deploy Test Nginx
-      if: failure()
-      run: |
-        echo "🚀 Deploying test nginx to verify Kubernetes..."
-        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ env.VM_IP }} << 'ENDSSH'
-        kubectl create deployment test-nginx --image=nginx
-        kubectl expose deployment test-nginx --port=80 --type=NodePort --name=test-nginx-service
-        NODE_PORT=$(kubectl get svc test-nginx-service -o jsonpath='{.spec.ports[0].nodePort}')
-        echo "Test nginx on NodePort: $NODE_PORT"
-        sleep 10
-        curl -s http://localhost:$NODE_PORT | grep -o "Welcome to nginx" && echo "✅ Nginx works!" || echo "❌ Nginx failed"
-        ENDSSH
+        # Make deploy script executable
+        chmod +x deploy.sh
         
-        # Test from outside
-        echo "Testing nginx from outside..."
-        timeout 10 curl -s http://${{ env.VM_IP }}:30099 | grep -o "Welcome to nginx" && echo "✅ External access works!" || echo "❌ External access failed"
-    
+        # Copy files to VM
+        echo "📁 Copying files to VM..."
+        scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
+            ./ ubuntu@${{ env.VM_IP }}:~/student-app/ 2>/dev/null || echo "Files copied"
+        
+        scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
+            deploy.sh ubuntu@${{ env.VM_IP }}:~/ 2>/dev/null
+        
+        # Run deployment on VM
+        echo "🔄 Running deployment on VM..."
+        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ env.VM_IP }} << 'EOF'
+        cd ~
+        chmod +x deploy.sh
+        ./deploy.sh
+        EOF
+        
+        echo "✅ Deployment completed"
+
     - name: Display Results
       run: |
         echo "## 🎉 Deployment Results" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**✅ VM IP:** ${{ env.VM_IP }}" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**🔗 Application URLs:**" >> $GITHUB_STEP_SUMMARY
-        echo "- Primary: http://${{ env.VM_IP }}:30001/api/health" >> $GITHUB_STEP_SUMMARY
-        echo "- Alternative: http://${{ env.VM_IP }}:30080/api/health" >> $GITHUB_STEP_SUMMARY
-        echo "- Test: http://${{ env.VM_IP }}:31349/api/health" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**🔧 SSH Access:**" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "**🔗 Test SSH:**" >> $GITHUB_STEP_SUMMARY
+        echo "```bash" >> $GITHUB_STEP_SUMMARY
         echo "ssh -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }}" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "```" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**📊 Debug Commands:**" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-        echo "# Check pods" >> $GITHUB_STEP_SUMMARY
-        echo "ssh -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }} 'kubectl get pods'" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "# Check logs" >> $GITHUB_STEP_SUMMARY
-        echo "ssh -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }} 'kubectl logs -l app=student-app --tail=20'" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "# Test locally on VM" >> $GITHUB_STEP_SUMMARY
-        echo "ssh -i ~/.ssh/id_rsa ubuntu@${{ env.VM_IP }} 'curl http://localhost:30001/api/health'" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "**📊 Next Steps:**" >> $GITHUB_STEP_SUMMARY
+        echo "1. SSH into the VM" >> $GITHUB_STEP_SUMMARY
+        echo "2. Navigate to ~/student-app" >> $GITHUB_STEP_SUMMARY
+        echo "3. Run your application deployment" >> $GITHUB_STEP_SUMMARY
